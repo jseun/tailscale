@@ -731,6 +731,18 @@ const dialNodeTimeout = 1500 * time.Millisecond
 //
 // TODO(bradfitz): longer if no options remain perhaps? ...  Or longer
 // overall but have dialRegion start overlapping races?
+// derpPort returns the TCP port to dial node n on: its explicit DERPPort if
+// set, otherwise 443 for an HTTPS DERP or 3340 for a plain HTTP one.
+func (c *Client) derpPort(n *tailcfg.DERPNode) string {
+	if n.DERPPort != 0 {
+		return fmt.Sprint(n.DERPPort)
+	}
+	if c.useHTTPS() {
+		return "443"
+	}
+	return "3340"
+}
+
 func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, error) {
 	// First see if we need to use an HTTP proxy.
 	proxyReq := &http.Request{
@@ -786,14 +798,7 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
 					// Start v4 dial
 				}
 			}
-			port := "443"
-			if !c.useHTTPS() {
-				port = "3340"
-			}
-			if n.DERPPort != 0 {
-				port = fmt.Sprint(n.DERPPort)
-			}
-			c, err := c.dialContext(ctx, proto, net.JoinHostPort(dst, port))
+			c, err := c.dialContext(ctx, proto, net.JoinHostPort(dst, c.derpPort(n)))
 			select {
 			case resc <- res{c, err}:
 			case <-ctx.Done():
@@ -873,15 +878,7 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
 		}
 	}()
 
-	// Keep port selection in sync with dialNode.
-	port := "443"
-	if !c.useHTTPS() {
-		port = "3340"
-	}
-	if n.DERPPort != 0 {
-		port = fmt.Sprint(n.DERPPort)
-	}
-	target := net.JoinHostPort(n.HostName, port)
+	target := net.JoinHostPort(n.HostName, c.derpPort(n))
 
 	var authHeader string
 	if buildfeatures.HasUseProxy {
