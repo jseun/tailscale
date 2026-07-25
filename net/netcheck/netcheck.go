@@ -878,7 +878,7 @@ func (c *Client) GetReport(ctx context.Context, dm *tailcfg.DERPMap, opts *GetRe
 		c.curState = nil
 	}()
 
-	if runtime.GOOS == "js" || runtime.GOOS == "tamago" || (runtime.GOOS == "plan9" && hostinfo.IsInVM86()) {
+	if !nettype.CanUDP() || runtime.GOOS == "tamago" || (runtime.GOOS == "plan9" && hostinfo.IsInVM86()) {
 		if onlySTUN {
 			return nil, errors.New("platform is restricted to HTTP, but OnlySTUN is set in opts")
 		}

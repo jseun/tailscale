@@ -843,6 +843,15 @@ func netInterfaces() ([]Interface, error) {
 	if altNetInterfaces != nil {
 		return altNetInterfaces()
 	}
+	if runtime.GOOS == "js" {
+		// The Go runtime cannot enumerate interfaces on js/wasm; the embedder
+		// supplies them as a single synthetic interface (see embedderInterfaces
+		// and nettype.SetEmbedderLocalAddresses). With no source installed this
+		// is empty, which is not an error — callers just see no addresses and
+		// fall back to STUN. Everything downstream (LocalAddresses, getState)
+		// then treats them exactly like natively enumerated interfaces.
+		return embedderInterfaces(), nil
+	}
 	ifs, err := net.Interfaces()
 	if err != nil {
 		return nil, err

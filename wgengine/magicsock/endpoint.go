@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
-	"runtime"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -32,6 +31,7 @@ import (
 	"tailscale.com/tstime/mono"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/nettype"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/ringlog"
 	"tailscale.com/util/slicesx"
@@ -903,7 +903,7 @@ func (de *endpoint) discoverUDPRelayPathsLocked(now mono.Time) {
 // wantUDPRelayPathDiscoveryLocked reports whether we should kick off UDP relay
 // path discovery.
 func (de *endpoint) wantUDPRelayPathDiscoveryLocked(now mono.Time) bool {
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		return false
 	}
 	if !de.c.relayManager.hasPeerRelayServers.Load() {
@@ -944,7 +944,7 @@ func (de *endpoint) wantUDPRelayPathDiscoveryLocked(now mono.Time) bool {
 //
 // de.mu must be held.
 func (de *endpoint) wantFullPingLocked(now mono.Time) bool {
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		return false
 	}
 	if !de.bestAddr.isDirect() || de.lastFullPing.IsZero() {
@@ -1297,7 +1297,7 @@ const (
 // is interested in the result (such as a CLI "tailscale ping" or a c2n ping
 // request, etc)
 func (de *endpoint) startDiscoPingLocked(ep epAddr, now mono.Time, purpose discoPingPurpose, size int, resCB *pingResultAndCallback) {
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		return
 	}
 	if debugNeverDirectUDP() && !ep.vni.IsSet() && ep.ap.Addr() != tailcfg.DerpMagicIPAddr {
@@ -1371,7 +1371,7 @@ func (de *endpoint) sendDiscoPingsLocked(now mono.Time, sendCallMeMaybe bool) {
 			de.deleteEndpointLocked("sendPingsLocked", ep)
 			continue
 		}
-		if runtime.GOOS == "js" {
+		if !nettype.CanUDP() {
 			continue
 		}
 		if !st.lastPing.IsZero() && now.Sub(st.lastPing) < discoPingInterval {
@@ -1409,7 +1409,7 @@ func (de *endpoint) sendDiscoPingsLocked(now mono.Time, sendCallMeMaybe bool) {
 // a WireGuard only endpoint and initiates an ICMP ping for useable
 // addresses.
 func (de *endpoint) sendWireGuardOnlyPingsLocked(now mono.Time) {
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		return
 	}
 
@@ -1946,7 +1946,7 @@ func betterAddr(a, b addrQuality) bool {
 // already sent to us via UDP, so their stateful firewall should be
 // open. Now we can Ping back and make it through.
 func (de *endpoint) handleCallMeMaybe(m *disco.CallMeMaybe) {
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		// Nothing to do on js/wasm if we can't send UDP packets anyway.
 		return
 	}

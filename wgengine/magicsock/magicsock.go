@@ -925,7 +925,7 @@ func (c *Conn) updateEndpoints(why string) {
 		c.muCond.Broadcast()
 	}()
 	c.dlogf("[v1] magicsock: starting endpoint update (%s)", why)
-	if c.noV4Send.Load() && runtime.GOOS != "js" && !c.onlyTCP443.Load() && !hostinfo.IsInVM86() {
+	if c.noV4Send.Load() && nettype.CanUDP() && !c.onlyTCP443.Load() && !hostinfo.IsInVM86() {
 		c.mu.Lock()
 		closed := c.closed
 		c.mu.Unlock()
@@ -1265,7 +1265,7 @@ func (c *Conn) RotateDiscoKey() {
 func (c *Conn) determineEndpoints(ctx context.Context) ([]tailcfg.Endpoint, error) {
 	var havePortmap bool
 	var portmapExt netip.AddrPort
-	if runtime.GOOS != "js" && c.portMapper != nil {
+	if nettype.CanUDP() && c.portMapper != nil {
 		portmapExt, havePortmap = c.portMapper.GetCachedMappingOrStartCreatingOne()
 	}
 
@@ -1275,7 +1275,7 @@ func (c *Conn) determineEndpoints(ctx context.Context) ([]tailcfg.Endpoint, erro
 		return nil, err
 	}
 
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		// TODO(bradfitz): why does control require an
 		// endpoint? Otherwise it doesn't stream map responses
 		// back.
@@ -1453,7 +1453,7 @@ func endpointSetsEqual(x, y []tailcfg.Endpoint) bool {
 
 // LocalPort returns the current IPv4 listener's port number.
 func (c *Conn) LocalPort() uint16 {
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		return 12345
 	}
 	laddr := c.pconn4.LocalAddr()
@@ -1541,7 +1541,7 @@ func (c *Conn) sendUDPBatch(addr epAddr, buffs [][]byte, offset int) (sent bool,
 // sendUDP sends UDP packet b to ipp.
 // See sendAddr's docs on the return value meanings.
 func (c *Conn) sendUDP(ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		return false, errNoUDP
 	}
 	sent, err = c.sendUDPStd(ipp, b)
@@ -1600,7 +1600,7 @@ func (c *Conn) maybeRebindOnError(err error) {
 // returns errors.ErrUnsupported if the client is explicitly configured to only
 // send data over TCP port 443 and/or we're running on wasm.
 func (c *Conn) sendUDPNetcheck(b []byte, addr netip.AddrPort) (int, error) {
-	if c.onlyTCP443.Load() || runtime.GOOS == "js" {
+	if c.onlyTCP443.Load() || !nettype.CanUDP() {
 		return 0, errors.ErrUnsupported
 	}
 	switch {
@@ -3472,7 +3472,7 @@ func (c *connBind) Open(ignoredPort uint16) ([]conn.ReceiveFunc, uint16, error) 
 	}
 	c.closed = false
 	fns := []conn.ReceiveFunc{c.receiveIPv4(), c.receiveIPv6(), c.receiveDERP}
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		fns = []conn.ReceiveFunc{c.receiveDERP}
 	}
 	// TODO: Combine receiveIPv4 and receiveIPv6 and receiveIP into a single
@@ -3681,6 +3681,19 @@ func (c *Conn) listenPacket(network string, port uint16) (nettype.PacketConn, er
 	if c.testOnlyPacketListener != nil {
 		return nettype.MakePacketListenerWithNetIP(c.testOnlyPacketListener).ListenPacket(ctx, network, addr)
 	}
+	// On js/wasm, where Go itself cannot open sockets, an embedder-provided
+	// socket factory takes the place of the netns listener.
+	if fn, caps := nettype.EmbedderSocket(); fn != nil && caps.UDP {
+		s, err := fn(ctx, network, addr, "")
+		if err != nil {
+			return nil, err
+		}
+		pc, ok := s.(nettype.PacketConn)
+		if !ok {
+			return nil, fmt.Errorf("embedder socket for %q returned %T, want nettype.PacketConn", network, s)
+		}
+		return pc, nil
+	}
 	return nettype.MakePacketListenerWithNetIP(netns.Listener(c.logf, c.netMon)).ListenPacket(ctx, network, addr)
 }
 
@@ -3700,7 +3713,7 @@ func (c *Conn) bindSocket(ruc *RebindingUDPConn, network string, curPortFate cur
 	ruc.mu.Lock()
 	defer ruc.mu.Unlock()
 
-	if runtime.GOOS == "js" {
+	if !nettype.CanUDP() {
 		ruc.setConnLocked(newBlockForeverConn(), "", c.bind.BatchSize(), c.controlKnobs)
 		return nil
 	}
@@ -3818,10 +3831,12 @@ func (c *Conn) Rebind() {
 
 	var ifIPs []netip.Prefix
 	if c.netMon != nil {
-		st := c.netMon.InterfaceState()
-		defIf := st.DefaultRouteInterface
-		ifIPs = st.InterfaceIPs[defIf]
-		c.logf("Rebind; defIf=%q, ips=%v", defIf, ifIPs)
+		// The state is nil on platforms that cannot enumerate interfaces (js).
+		if st := c.netMon.InterfaceState(); st != nil {
+			defIf := st.DefaultRouteInterface
+			ifIPs = st.InterfaceIPs[defIf]
+			c.logf("Rebind; defIf=%q, ips=%v", defIf, ifIPs)
+		}
 	}
 
 	if len(ifIPs) > 0 {
