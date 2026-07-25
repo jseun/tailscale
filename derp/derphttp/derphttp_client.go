@@ -46,6 +46,7 @@ import (
 	"tailscale.com/tstime"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/nettype"
 )
 
 // Client is a DERP-over-HTTP client.
@@ -326,7 +327,11 @@ func useWebsockets() bool {
 		return false
 	}
 	if runtime.GOOS == "js" {
-		return true
+		// An embedder socket factory that can open a stream takes precedence
+		// over the websocket fallback: the normal DERP-over-TCP path then works
+		// even though Go itself cannot open sockets on js.
+		_, caps := nettype.EmbedderSocket()
+		return !(caps.TCP || caps.TLS)
 	}
 	if dialWebsocketFunc != nil {
 		return envknob.Bool("TS_DEBUG_DERP_WS_CLIENT")
@@ -468,7 +473,11 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
 	var serverPub key.NodePublic // or zero if unknown (if not using TLS or TLS middlebox eats it)
 	var serverProtoVersion int
 	var tlsState *tls.ConnectionState
-	if c.useHTTPS() {
+	// On js the conn may come from the embedder socket; when it terminates TLS
+	// itself (an https DERP with the TLS capability) the conn already carries
+	// cleartext, so skip Go-level TLS to avoid double-wrapping. A plain http://
+	// DERP has useHTTPS() false and skips this block regardless.
+	if c.useHTTPS() && !c.embedderTerminatesTLS() {
 		tlsConn := c.tlsClient(tcpConn, node)
 		httpConn = tlsConn
 
@@ -602,6 +611,9 @@ func (c *Client) SetURLDialer(dialer netx.DialFunc) {
 
 func (c *Client) dialURL(ctx context.Context) (net.Conn, error) {
 	host := c.url.Hostname()
+	if conn, ok, err := c.embedderDial(ctx, net.JoinHostPort(host, urlPort(c.url))); ok || err != nil {
+		return conn, err
+	}
 	if c.dialer != nil {
 		return c.dialer(ctx, "tcp", net.JoinHostPort(host, urlPort(c.url)))
 	}
@@ -723,14 +735,6 @@ func shouldDialProto(s string, pred func(netip.Addr) bool) bool {
 	return pred(ip)
 }
 
-const dialNodeTimeout = 1500 * time.Millisecond
-
-// dialNode returns a TCP connection to node n, racing IPv4 and IPv6
-// (both as applicable) against each other.
-// A node is only given dialNodeTimeout to connect.
-//
-// TODO(bradfitz): longer if no options remain perhaps? ...  Or longer
-// overall but have dialRegion start overlapping races?
 // derpPort returns the TCP port to dial node n on: its explicit DERPPort if
 // set, otherwise 443 for an HTTPS DERP or 3340 for a plain HTTP one.
 func (c *Client) derpPort(n *tailcfg.DERPNode) string {
@@ -743,7 +747,18 @@ func (c *Client) derpPort(n *tailcfg.DERPNode) string {
 	return "3340"
 }
 
+const dialNodeTimeout = 1500 * time.Millisecond
+
+// dialNode returns a TCP connection to node n, racing IPv4 and IPv6
+// (both as applicable) against each other.
+// A node is only given dialNodeTimeout to connect.
+//
+// TODO(bradfitz): longer if no options remain perhaps? ...  Or longer
+// overall but have dialRegion start overlapping races?
 func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, error) {
+	if conn, ok, err := c.embedderDial(ctx, net.JoinHostPort(n.HostName, c.derpPort(n))); ok || err != nil {
+		return conn, err
+	}
 	// First see if we need to use an HTTP proxy.
 	proxyReq := &http.Request{
 		Method: "GET", // doesn't really matter
